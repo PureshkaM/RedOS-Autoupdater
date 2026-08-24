@@ -1,0 +1,10 @@
+[Unit]
+Description=Run dnf-auto-update.service on boot and every 3 days (catches up missed runs)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=3d
+Persistent=true
+
+[Install]
+WantedBy=timers.target
