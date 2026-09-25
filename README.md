@@ -12,13 +12,16 @@ running on a machine nobody is watching.
   calendar days.
 - If `dnf update -y` fails, escalates through `--allowerasing`, then
   `--setopt=best=False`, then `--skip-broken`.
-- Separately detects RPM **file-type conflicts** -- e.g. a path that was a
-  directory in the old package version and becomes a symlink in the new one.
-  No dnf flag fixes this (it's caught during the rpm transaction check, not
-  dependency resolution); the script removes the stale copy with
-  `rpm -e --nodeps` and reinstalls the package cleanly with `dnf install -y`.
-  If that reinstall fails, the old version is put back; if even that fails,
-  the run is reported as FAILED with the missing package named.
+- Separately handles RPM **file conflicts**, which no dnf flag fixes (they are
+  caught during the rpm transaction check, not dependency resolution). The
+  packages involved are downloaded first, so nothing is erased while the
+  network or repos might fail. A conflict between two packages is fixed with
+  `rpm -U --replacefiles` of the new package -- nothing is removed. A path
+  that changes type within one package (a directory becoming a symlink) needs
+  the old copy erased: `rpm -e --nodeps`, then `dnf install` of the local file,
+  and the old version is put back if that fails. If a package still ends up
+  missing, the run stops instead of escalating to `--allowerasing`, which
+  could erase whatever depended on it.
 - After a successful update, checks that `display-manager.service` (whichever
   desktop is installed -- KDE/sddm, GNOME/gdm, MATE/lightdm, ...) is still
   active, and restarts it if the update knocked it down. Manually removing

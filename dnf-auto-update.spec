@@ -13,6 +13,8 @@ Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  systemd-rpm-macros
 Requires:       dnf
+# dnf download: fetch packages before erasing anything on a file conflict.
+Requires:       dnf-plugins-core
 Requires:       systemd
 Requires:       util-linux
 %{?systemd_requires}
@@ -28,11 +30,11 @@ without babysitting.
   of being skipped.
 - On failure, escalates dnf update -y through --allowerasing, then
   --setopt=best=False, then --skip-broken.
-- Separately detects RPM file-type conflicts (a path changing from a
-  directory to a symlink between package versions, etc.) that no dnf flag
-  can fix because they are caught during the rpm transaction check, not
-  dependency resolution -- the script removes the stale copy and reinstalls
-  the package cleanly.
+- Separately handles RPM file conflicts that no dnf flag can fix: packages
+  are downloaded first, a conflict between packages is fixed with
+  rpm -U --replacefiles, and only a path changing type within one package
+  (directory to symlink) erases the old copy, with rollback to the old
+  version if the fresh install fails.
 - After a successful update, checks that display-manager.service (whatever
   desktop environment is installed -- KDE/sddm, GNOME/gdm, MATE/lightdm, ...)
   is still active and restarts it if the update knocked it down.
@@ -87,7 +89,9 @@ fi
   running kernel as boot default while any of them is missing
 - xz payload so the package installs on RED OS 7.3
 - Fix: --best=false is invalid in dnf 4, use --setopt=best=False
-- Fix: restore the old package if reinstall after a file conflict fails
+- File conflicts: download first, --replacefiles for conflicts between
+  packages, erase + local install with rollback only for path type changes;
+  stop instead of escalating to --allowerasing if a package got lost
 - Fix: do not re-enable the timer on package upgrade
 - Drop Persistent=true: it only applies to OnCalendar= timers
 

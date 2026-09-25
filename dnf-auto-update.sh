@@ -27,39 +27,68 @@ log() {
     echo "[$(date -Is)] $*"
 }
 
-# rpm refuses an in-place upgrade when a path changes type between versions
-# (e.g. a directory becomes a symlink), which --allowerasing/--best/--skip-broken
-# cannot fix since it happens during the rpm transaction check, not depsolving.
-# The only way out is to drop the old copy and let dnf install the new one fresh.
+# rpm reports "file X from install of A conflicts with file from package B"
+# during its transaction check, after depsolving, so no dnf flag gets past it.
+# Two cases:
+#   - A and B are the same package: a path changed type between versions (a
+#     directory became a symlink). rpm cannot replace a directory in place, so
+#     the old copy has to go. The new package (and the old one, if the repos
+#     still have it) is downloaded first, so erasing never waits on the network,
+#     and the old version is put back if the fresh install fails.
+#   - A and B are different packages claiming one file: A is installed from a
+#     local file with --replacefiles; nothing is erased. --nodeps because A may
+#     need other updates from the same transaction; the next dnf pass pulls them.
+# Returns 0 if at least one conflict was fixed, 1 if nothing could be done.
 handle_file_conflicts() {
     local out="$1"
-    local nevras
-    nevras=$(printf '%s\n' "$out" | grep -oP '(?<=conflicts with file from package )\S+' | sort -u)
-    [ -z "$nevras" ] && return 1
+    local pairs
+    pairs=$(printf '%s\n' "$out" \
+        | grep -oP 'from install of \S+ conflicts with file from package \S+' \
+        | awk '{print $4, $NF}' | sort -u)
+    [ -z "$pairs" ] && return 1
 
-    local names=() olds=()
-    local nevra name
-    for nevra in $nevras; do
-        name=$(rpm -q --qf '%{NAME}\n' "$nevra" 2>/dev/null)
-        [ -z "$name" ] && name="$nevra"
-        log "File conflict on $nevra -- removing old copy (rpm -e --nodeps) and reinstalling latest"
-        rpm -e --nodeps "$nevra"
-        names+=("$name")
-        olds+=("$nevra")
-    done
+    local want have wname hname arch dir new old fixed=1
+    while read -r want have <&3; do
+        hname=$(rpm -q --qf '%{NAME}' "$have" 2>/dev/null) || continue
+        arch=$(rpm -q --qf '%{ARCH}' "$have" 2>/dev/null)
+        wname=${want%-*-*}
+        dir=$(mktemp -d /var/tmp/dnf-auto-update.XXXXXX) || continue
+        mkdir -p "$dir/new" "$dir/old"
 
-    # The package is gone now: if the latest cannot be installed, put the old
-    # version back rather than leave the system without it.
-    local i
-    for i in "${!names[@]}"; do
-        log "dnf install -y ${names[$i]}"
-        dnf install -y "${names[$i]}" && continue
-        log "WARNING: reinstall of ${names[$i]} failed, restoring ${olds[$i]}"
-        dnf install -y "${olds[$i]}" && continue
-        log "WARNING: ${names[$i]} is NOT installed anymore -- manual check needed"
-        lost_pkgs+=("${names[$i]}")
-    done
-    return 0
+        log "File conflict: installing $want vs installed $have -- downloading before touching anything"
+        dnf download -q --destdir "$dir/new" "$want"
+        new=$(ls "$dir"/new/*.rpm 2>/dev/null | head -n1)
+
+        if [ -z "$new" ]; then
+            log "WARNING: could not download $want, leaving $have untouched"
+        elif [ "$wname" != "$hname" ]; then
+            if rpm -Uvh --replacefiles --nodeps "$new"; then
+                log "$want installed over files of $have (--replacefiles)"
+                fixed=0
+            else
+                log "WARNING: rpm -U --replacefiles $want failed, nothing was changed"
+            fi
+        else
+            dnf download -q --arch "$arch" --destdir "$dir/old" "$have" &>/dev/null
+            old=$(ls "$dir"/old/*.rpm 2>/dev/null | head -n1)
+            [ -z "$old" ] && log "WARNING: $have is no longer in the repos, no rollback copy"
+            log "Removing $have (rpm -e --nodeps) and installing $want from the local file"
+            rpm -e --nodeps "$have"
+            if dnf install -y "$new"; then
+                fixed=0
+            else
+                log "WARNING: install of $want failed, restoring $have"
+                if [ -n "$old" ] && rpm -ivh --nodeps "$old"; then
+                    log "$have restored"
+                else
+                    log "WARNING: $hname is NOT installed anymore -- manual check needed"
+                    lost_pkgs+=("$hname")
+                fi
+            fi
+        fi
+        rm -rf "$dir"
+    done 3<<< "$pairs"
+    return $fixed
 }
 
 # Manual file-conflict remediation (rpm -e --nodeps + dnf install) bypasses the
@@ -115,7 +144,14 @@ for ((i = 0; i < MAX_ITERATIONS; i++)); do
 
     if printf '%s\n' "$out" | grep -q "conflicts with file from package"; then
         handle_file_conflicts "$out"
-        continue
+        fixed=$?
+        # Escalating to --allowerasing now could erase whatever depended
+        # on a package that is gone, so stop and leave it to a human.
+        if [ ${#lost_pkgs[@]} -gt 0 ]; then
+            break
+        fi
+        [ $fixed -eq 0 ] && continue
+        log "File conflict could not be resolved automatically"
     fi
 
     if [ $level -lt $((${#flag_levels[@]} - 1)) ]; then
