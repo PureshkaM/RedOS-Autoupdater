@@ -55,10 +55,11 @@ Both behaviours can be turned off in `/etc/sysconfig/dnf-auto-update`
 
 ## Install
 
-Grab a `.rpm` from [Releases](../../releases) and:
+Grab the `.rpm` for your release from [`dist/`](dist/) and:
 
 ```sh
-dnf install ./dnf-auto-update-1.1-1.noarch.rpm
+dnf install ./dnf-auto-update-1.1-1.el7.noarch.rpm     # RED OS 7.3
+dnf install ./dnf-auto-update-1.1-1.red80.noarch.rpm   # RED OS 8
 ```
 
 The package's `%post` scriptlet enables and starts the timer immediately --
@@ -71,15 +72,16 @@ journalctl -u dnf-auto-update.service
 
 ## Build from source
 
+On a RED OS host (as root, or with rpm-build already installed):
+
 ```sh
-tar czf dnf-auto-update-1.1.tar.gz --transform 's,^,dnf-auto-update-1.1/,' \
-    dnf-auto-update-dispatch.sh dnf-auto-update.sh dnf-auto-update-redos73.sh \
-    dnf-auto-update.sysconfig dnf-auto-update.service dnf-auto-update.timer \
-    dnf-auto-update.logrotate README.md LICENSE
-rpmbuild -ba dnf-auto-update.spec --define "_sourcedir $(pwd)"
+./build-rpm.sh        # -> dist/*.noarch.rpm, dist/*.src.rpm
 ```
 
-Build dependencies: `rpm-build`, `systemd-rpm-macros`.
+CI (`.github/workflows/build-rpm.yml`) builds the package in the official
+RED OS 7.3 and 8 containers (`registry.red-soft.ru/ubi7/ubi`, `ubi8/ubi`),
+installs it and does one real update run there (`ci/smoke-test.sh`). Ready
+packages for both releases are kept in [`dist/`](dist/).
 
 ## Notes / known limitations
 
