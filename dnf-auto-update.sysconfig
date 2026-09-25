@@ -1,0 +1,8 @@
+# dnf-auto-update settings. Read by the RED OS 7.3 script only.
+
+# Enable the kernels6 repository and move to the supported Linux 6.1 branch.
+KERNEL6_SWITCH=yes
+
+# Install kernel-module packages (<driver>_<kernel>) for a newly installed
+# kernel; keep booting the current kernel while any of them is unavailable.
+KMOD_FOLLOW=yes

@@ -24,15 +24,36 @@ running on a machine nobody is watching.
   skips the `%post`/`%postun` service-restart scriptlets a package would
   normally get, so this check exists specifically to cover that gap.
 - Refuses to run two copies at once (`flock`).
+- Detects the RED OS release from `/etc/os-release` and runs the matching
+  script from `/usr/libexec/dnf-auto-update/` (`redos-8`, `redos-7.3`;
+  anything unrecognized falls back to `redos-8`).
 - Logs to `/var/log/dnf-auto-update.log` (rotated weekly, 8 weeks kept) and
   to `journalctl -u dnf-auto-update.service`.
+
+## RED OS 7.3 specifics
+
+On 7.3 only the Linux 6.1 kernel branch is still fully supported (5.15 got its
+last update in February 2025). The 7.3 script therefore:
+
+- after a successful `dnf update`, installs `redos-kernels6-release`, runs
+  `dnf makecache` and updates again -- the procedure from the RED OS knowledge
+  base article "Обновление ядра Linux до версии 6.1 в РЕД ОС 7.3";
+- installs kernel-module packages for the newest kernel. On RED OS their name
+  carries the kernel build (`nvidia-kmod_$(uname -r)`), so `dnf update` never
+  brings them along with a new kernel. If a module for the new kernel is not
+  in the repo yet, the running kernel stays the grub default (via `grubby`)
+  until it appears; the pin is recorded in `/var/lib/dnf-auto-update/pinned-kernel`;
+- never reboots: the new kernel is used after the next reboot by the user.
+
+Both behaviours can be turned off in `/etc/sysconfig/dnf-auto-update`
+(`KERNEL6_SWITCH`, `KMOD_FOLLOW`).
 
 ## Install
 
 Grab a `.rpm` from [Releases](../../releases) and:
 
 ```sh
-dnf install ./dnf-auto-update-1.0-1.noarch.rpm
+dnf install ./dnf-auto-update-1.1-1.noarch.rpm
 ```
 
 The package's `%post` scriptlet enables and starts the timer immediately --
@@ -46,8 +67,9 @@ journalctl -u dnf-auto-update.service
 ## Build from source
 
 ```sh
-tar czf dnf-auto-update-1.0.tar.gz --transform 's,^,dnf-auto-update-1.0/,' \
-    dnf-auto-update.sh dnf-auto-update.service dnf-auto-update.timer \
+tar czf dnf-auto-update-1.1.tar.gz --transform 's,^,dnf-auto-update-1.1/,' \
+    dnf-auto-update-dispatch.sh dnf-auto-update.sh dnf-auto-update-redos73.sh \
+    dnf-auto-update.sysconfig dnf-auto-update.service dnf-auto-update.timer \
     dnf-auto-update.logrotate README.md LICENSE
 rpmbuild -ba dnf-auto-update.spec --define "_sourcedir $(pwd)"
 ```
@@ -60,6 +82,7 @@ Build dependencies: `rpm-build`, `systemd-rpm-macros`.
   a synthetic file conflict, killed display manager recovery, concurrent-run
   locking, and an actual reboot to confirm the boot trigger and the 3-day
   `Persistent=true` catch-up all work as described.
+- The RED OS 7.3 script has not been run on a real 7.3 machine yet.
 - The display-manager recovery uses the generic `display-manager.service`
   alias rather than hardcoding sddm, so it should cover GNOME/gdm and
   MATE/lightdm installs too -- but that path has only been verified on a
