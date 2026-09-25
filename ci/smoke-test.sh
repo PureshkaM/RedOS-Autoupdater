@@ -17,7 +17,9 @@ bash --version | head -n1
 dnf --version | head -n1
 
 section "Package"
-rpm=$(ls dist/*.noarch.rpm | head -n1)
+# Pick the package built for this release by its dist tag; OUT may hold others.
+rpm=$(ls "${OUT:-dist}"/*"$(rpm --eval '%{?dist}')".noarch.rpm | head -n1)
+echo "testing $rpm"
 rpm -qpi "$rpm"
 echo "payload: $(rpm -qp --qf '%{PAYLOADCOMPRESSOR}' "$rpm")"
 rpm -qp --requires "$rpm"

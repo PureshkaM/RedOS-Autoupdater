@@ -21,17 +21,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Build into out/, not dist/: dist/ holds the committed release packages.
       # Plain `docker run` rather than `container:`: the RED OS images are
       # minimal and actions would have to run their JS runtime inside them.
       - name: Build RPM on ${{ matrix.os }}
-        run: docker run --rm -v "$PWD:/src" -w /src ${{ matrix.image }} bash ./build-rpm.sh
+        run: docker run --rm -e OUT=out -v "$PWD:/src" -w /src ${{ matrix.image }} bash ./build-rpm.sh
 
       - name: Smoke test on ${{ matrix.os }}
-        run: docker run --rm -v "$PWD:/src" -w /src ${{ matrix.image }} bash ./ci/smoke-test.sh
+        run: docker run --rm -e OUT=out -v "$PWD:/src" -w /src ${{ matrix.image }} bash ./ci/smoke-test.sh
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: rpm-${{ matrix.os }}
-          path: dist/*.rpm
+          path: out/*.rpm
           if-no-files-found: warn

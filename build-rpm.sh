@@ -1,10 +1,11 @@
 #!/bin/bash
-# Build the binary and source RPM on the current RED OS host into ./dist.
+# Build the binary and source RPM on the current RED OS host into $OUT (./dist).
 # Needs root only to install missing build dependencies.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 NAME=dnf-auto-update
+OUT=${OUT:-dist}
 VER=$(awk '/^Version:/ {print $2}' $NAME.spec)
 SOURCES=(
     dnf-auto-update-dispatch.sh dnf-auto-update.sh dnf-auto-update-redos73.sh
@@ -27,5 +28,5 @@ mkdir -p "$top"/{SOURCES,SPECS,BUILD,RPMS,SRPMS}
 tar czf "$top/SOURCES/$NAME-$VER.tar.gz" --transform "s,^,$NAME-$VER/," "${SOURCES[@]}"
 rpmbuild -ba $NAME.spec --define "_topdir $top"
 
-mkdir -p dist
-cp -v "$top"/RPMS/noarch/*.rpm "$top"/SRPMS/*.rpm dist/
+mkdir -p "$OUT"
+cp -v "$top"/RPMS/noarch/*.rpm "$top"/SRPMS/*.rpm "$OUT"/
