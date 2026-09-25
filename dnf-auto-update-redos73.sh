@@ -27,6 +27,13 @@ if ! flock -n 9; then
 fi
 
 exec > >(tee -a "$LOGFILE") 2>&1
+TEE_PID=${!:-}
+# systemd kills whatever is left in the cgroup once the script exits, so let tee
+# drain the pipe first or the final status lines never reach the log file.
+trap 'exec >&- 2>&-; [ -n "$TEE_PID" ] && wait "$TEE_PID" 2>/dev/null' EXIT
+
+# Packages removed by handle_file_conflicts that could not be put back.
+lost_pkgs=()
 
 log() {
     echo "[$(date -Is)] $*"
@@ -42,7 +49,7 @@ handle_file_conflicts() {
     nevras=$(printf '%s\n' "$out" | grep -oP '(?<=conflicts with file from package )\S+' | sort -u)
     [ -z "$nevras" ] && return 1
 
-    local names=()
+    local names=() olds=()
     local nevra name
     for nevra in $nevras; do
         name=$(rpm -q --qf '%{NAME}\n' "$nevra" 2>/dev/null)
@@ -50,12 +57,19 @@ handle_file_conflicts() {
         log "File conflict on $nevra -- removing old copy (rpm -e --nodeps) and reinstalling latest"
         rpm -e --nodeps "$nevra"
         names+=("$name")
+        olds+=("$nevra")
     done
 
-    local n
-    for n in "${names[@]}"; do
-        log "dnf install -y $n"
-        dnf install -y "$n"
+    # The package is gone now: if the latest cannot be installed, put the old
+    # version back rather than leave the system without it.
+    local i
+    for i in "${!names[@]}"; do
+        log "dnf install -y ${names[$i]}"
+        dnf install -y "${names[$i]}" && continue
+        log "WARNING: reinstall of ${names[$i]} failed, restoring ${olds[$i]}"
+        dnf install -y "${olds[$i]}" && continue
+        log "WARNING: ${names[$i]} is NOT installed anymore -- manual check needed"
+        lost_pkgs+=("${names[$i]}")
     done
     return 0
 }
@@ -119,27 +133,52 @@ switch_to_kernel6() {
     run_update
 }
 
-newest_kernel() {
+installed_kernels() {
     local d v
     for d in /lib/modules/*/; do
         v=$(basename "$d")
         [ -e "/boot/vmlinuz-$v" ] && echo "$v"
-    done | sort -V | tail -n1
+    done | sort -V
+}
+
+newest_kernel() {
+    installed_kernels | tail -n1
+}
+
+# Package names a driver may have for kernel $2: with and without ".<arch>".
+kmod_candidates() {
+    local base=$1 k=$2 short
+    echo "${base}_${k}"
+    short="${k%.$(uname -m)}"
+    [ "$short" != "$k" ] && echo "${base}_${short}"
+    return 0
+}
+
+# True if every driver in $2 (whitespace list) is installed for kernel $1.
+kernel_has_kmods() {
+    local k=$1 base cand ok
+    for base in $2; do
+        ok=0
+        for cand in $(kmod_candidates "$base" "$k"); do
+            rpm -q "$cand" &>/dev/null && { ok=1; break; }
+        done
+        [ $ok -eq 1 ] || return 1
+    done
+    return 0
 }
 
 # Kernel-module packages on RED OS carry the full kernel build in their name
 # (nvidia-kmod_6.1.158-1.el7.x86_64), so a new kernel -- even a minor one --
 # never gets its drivers through `dnf update`. For every driver installed for
 # any kernel, install the same driver for the newest kernel. If one is missing
-# from the repo, keep the running kernel as the boot default so the next boot
-# does not come up without, say, the GPU driver; lift the pin once it appears.
+# from the repo, make the newest kernel that has all drivers the boot default so
+# the next boot does not come up without, say, the GPU driver; lift the pin once
+# the driver appears.
 follow_kmods() {
     [ "$KMOD_FOLLOW" = yes ] || return 0
 
-    local newest running arch
+    local newest
     newest=$(newest_kernel)
-    running=$(uname -r)
-    arch=$(uname -m)
     [ -z "$newest" ] && return 0
 
     # Driver names without the "_<kernel build>" suffix, deduplicated across kernels.
@@ -150,31 +189,32 @@ follow_kmods() {
 
     local missing=() base cand ok
     for base in $bases; do
+        kernel_has_kmods "$newest" "$base" && continue
         ok=0
-        for cand in "${base}_${newest}" "${base}_${newest%.$arch}"; do
-            if rpm -q "$cand" &>/dev/null; then ok=1; break; fi
+        for cand in $(kmod_candidates "$base" "$newest"); do
+            log "Installing kernel module package $cand for kernel $newest"
+            if dnf install -y "$cand"; then ok=1; break; fi
         done
-        if [ $ok -eq 0 ]; then
-            for cand in "${base}_${newest}" "${base}_${newest%.$arch}"; do
-                log "Installing kernel module package $cand for kernel $newest"
-                if dnf install -y "$cand"; then ok=1; break; fi
-            done
-        fi
         [ $ok -eq 0 ] && missing+=("$base")
     done
 
     if [ ${#missing[@]} -gt 0 ]; then
         log "WARNING: no kernel module package for $newest: ${missing[*]}"
-        if [ "$newest" = "$running" ]; then
-            log "WARNING: running kernel already is $newest, nothing to fall back to -- manual check needed"
+        local k fallback=""
+        for k in $(installed_kernels | sort -rV); do
+            [ "$k" = "$newest" ] && continue
+            if kernel_has_kmods "$k" "$bases"; then fallback=$k; break; fi
+        done
+        if [ -z "$fallback" ]; then
+            log "WARNING: no installed kernel has all of: $(echo $bases) -- boot default left as is, manual check needed"
         elif ! command -v grubby &>/dev/null; then
-            log "WARNING: grubby not found, cannot keep $running as boot default -- next boot uses $newest without those modules"
-        elif grubby --set-default "/boot/vmlinuz-$running"; then
+            log "WARNING: grubby not found, cannot make $fallback the boot default -- next boot may use $newest without those modules"
+        elif grubby --set-default "/boot/vmlinuz-$fallback"; then
             mkdir -p "$STATEDIR"
             echo "$newest" > "$PINFILE"
-            log "Boot default kept on running kernel $running until modules for $newest are available"
+            log "Boot default set to $fallback until modules for $newest are available"
         else
-            log "WARNING: grubby --set-default failed -- next boot uses $newest without those modules"
+            log "WARNING: grubby --set-default failed -- next boot may use $newest without those modules"
         fi
         return 0
     fi
@@ -233,7 +273,10 @@ if [ -n "$failed_units" ]; then
     printf '%s\n' "$failed_units"
 fi
 
-if [ $success -eq 1 ]; then
+if [ ${#lost_pkgs[@]} -gt 0 ]; then
+    log "=== dnf auto-update FAILED: packages removed and not restored: ${lost_pkgs[*]} ==="
+    exit 1
+elif [ $success -eq 1 ]; then
     log "=== dnf auto-update finished OK ==="
     exit 0
 else
