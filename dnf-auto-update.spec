@@ -23,11 +23,11 @@ system (built for RED OS, works on any RHEL-family distro) up to date
 without babysitting.
 
 - Runs 5 minutes after boot and every 3 days after that.
-- If the machine was powered off at the scheduled time, systemd's
-  Persistent=true guarantees the missed run fires once at next boot instead
+- A machine that was powered off at the scheduled time catches up via the
+  boot run; the 3-day interval counts uptime (monotonic clock), not calendar
   of being skipped.
 - On failure, escalates dnf update -y through --allowerasing, then
-  --best=false, then --skip-broken.
+  --setopt=best=False, then --skip-broken.
 - Separately detects RPM file-type conflicts (a path changing from a
   directory to a symlink between package versions, etc.) that no dnf flag
   can fix because they are caught during the rpm transaction check, not
@@ -68,7 +68,10 @@ install -Dm0644 dnf-auto-update.logrotate %{buildroot}%{_sysconfdir}/logrotate.d
 
 %post
 %systemd_post dnf-auto-update.timer
-systemctl enable --now dnf-auto-update.timer >/dev/null 2>&1 || :
+# Fresh install only: on upgrade this would re-enable a timer the admin disabled.
+if [ $1 -eq 1 ]; then
+    systemctl enable --now dnf-auto-update.timer >/dev/null 2>&1 || :
+fi
 
 %preun
 %systemd_preun dnf-auto-update.timer
@@ -83,6 +86,10 @@ systemctl enable --now dnf-auto-update.timer >/dev/null 2>&1 || :
 - RED OS 7.3: install kernel-module packages for the new kernel, keep the
   running kernel as boot default while any of them is missing
 - xz payload so the package installs on RED OS 7.3
+- Fix: --best=false is invalid in dnf 4, use --setopt=best=False
+- Fix: restore the old package if reinstall after a file conflict fails
+- Fix: do not re-enable the timer on package upgrade
+- Drop Persistent=true: it only applies to OnCalendar= timers
 
 * Mon Aug 24 2026 Maksim Khripunov <xripmax@gmail.com> - 1.0-1
 - Initial release

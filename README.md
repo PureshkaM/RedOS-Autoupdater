@@ -7,16 +7,18 @@ running on a machine nobody is watching.
 ## What it does
 
 - Runs 5 minutes after boot, then every 3 days after that.
-- If the machine was powered off at the scheduled time, `Persistent=true`
-  makes systemd run the missed update once at the next boot instead of
-  skipping it.
+- A machine that was powered off at the scheduled time catches up through
+  the boot run. The 3-day interval counts uptime (monotonic clock), not
+  calendar days.
 - If `dnf update -y` fails, escalates through `--allowerasing`, then
-  `--best=false`, then `--skip-broken`.
+  `--setopt=best=False`, then `--skip-broken`.
 - Separately detects RPM **file-type conflicts** -- e.g. a path that was a
   directory in the old package version and becomes a symlink in the new one.
   No dnf flag fixes this (it's caught during the rpm transaction check, not
   dependency resolution); the script removes the stale copy with
   `rpm -e --nodeps` and reinstalls the package cleanly with `dnf install -y`.
+  If that reinstall fails, the old version is put back; if even that fails,
+  the run is reported as FAILED with the missing package named.
 - After a successful update, checks that `display-manager.service` (whichever
   desktop is installed -- KDE/sddm, GNOME/gdm, MATE/lightdm, ...) is still
   active, and restarts it if the update knocked it down. Manually removing
@@ -80,8 +82,8 @@ Build dependencies: `rpm-build`, `systemd-rpm-macros`.
 
 - Tested end-to-end on RED OS 8.0 (dnf 4.17.0): real-world file conflict,
   a synthetic file conflict, killed display manager recovery, concurrent-run
-  locking, and an actual reboot to confirm the boot trigger and the 3-day
-  `Persistent=true` catch-up all work as described.
+  locking, and an actual reboot to confirm the boot trigger all work as
+  described (on 1.0, before the 1.1 fixes).
 - The RED OS 7.3 script has not been run on a real 7.3 machine yet.
 - The display-manager recovery uses the generic `display-manager.service`
   alias rather than hardcoding sddm, so it should cover GNOME/gdm and
