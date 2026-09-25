@@ -15,6 +15,13 @@ if ! flock -n 9; then
 fi
 
 exec > >(tee -a "$LOGFILE") 2>&1
+TEE_PID=${!:-}
+# systemd kills whatever is left in the cgroup once the script exits, so let tee
+# drain the pipe first or the final status lines never reach the log file.
+trap 'exec >&- 2>&-; [ -n "$TEE_PID" ] && wait "$TEE_PID" 2>/dev/null' EXIT
+
+# Packages removed by handle_file_conflicts that could not be put back.
+lost_pkgs=()
 
 log() {
     echo "[$(date -Is)] $*"
@@ -30,7 +37,7 @@ handle_file_conflicts() {
     nevras=$(printf '%s\n' "$out" | grep -oP '(?<=conflicts with file from package )\S+' | sort -u)
     [ -z "$nevras" ] && return 1
 
-    local names=()
+    local names=() olds=()
     local nevra name
     for nevra in $nevras; do
         name=$(rpm -q --qf '%{NAME}\n' "$nevra" 2>/dev/null)
@@ -38,12 +45,19 @@ handle_file_conflicts() {
         log "File conflict on $nevra -- removing old copy (rpm -e --nodeps) and reinstalling latest"
         rpm -e --nodeps "$nevra"
         names+=("$name")
+        olds+=("$nevra")
     done
 
-    local n
-    for n in "${names[@]}"; do
-        log "dnf install -y $n"
-        dnf install -y "$n"
+    # The package is gone now: if the latest cannot be installed, put the old
+    # version back rather than leave the system without it.
+    local i
+    for i in "${!names[@]}"; do
+        log "dnf install -y ${names[$i]}"
+        dnf install -y "${names[$i]}" && continue
+        log "WARNING: reinstall of ${names[$i]} failed, restoring ${olds[$i]}"
+        dnf install -y "${olds[$i]}" && continue
+        log "WARNING: ${names[$i]} is NOT installed anymore -- manual check needed"
+        lost_pkgs+=("${names[$i]}")
     done
     return 0
 }
@@ -74,11 +88,13 @@ check_graphical_session() {
 
 log "=== dnf auto-update start ==="
 
+# --setopt=best=False instead of --best=false: in dnf 4 --best is a bare switch,
+# so "--best=false" is rejected by the argument parser before dnf does anything.
 flag_levels=(
     ""
     "--allowerasing"
-    "--allowerasing --best=false"
-    "--allowerasing --best=false --skip-broken"
+    "--allowerasing --setopt=best=False"
+    "--allowerasing --setopt=best=False --skip-broken"
 )
 level=0
 success=0
@@ -119,7 +135,10 @@ if [ -n "$failed_units" ]; then
     printf '%s\n' "$failed_units"
 fi
 
-if [ $success -eq 1 ]; then
+if [ ${#lost_pkgs[@]} -gt 0 ]; then
+    log "=== dnf auto-update FAILED: packages removed and not restored: ${lost_pkgs[*]} ==="
+    exit 1
+elif [ $success -eq 1 ]; then
     log "=== dnf auto-update finished OK ==="
     exit 0
 else
