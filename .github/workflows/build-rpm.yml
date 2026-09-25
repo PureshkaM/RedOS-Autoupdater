@@ -1,0 +1,37 @@
+name: build-rpm
+
+on:
+  workflow_dispatch:
+  push:
+    paths-ignore:
+      - 'dist/**'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: redos7.3
+            image: registry.red-soft.ru/ubi7/ubi:latest
+          - os: redos8
+            image: registry.red-soft.ru/ubi8/ubi:latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # Plain `docker run` rather than `container:`: the RED OS images are
+      # minimal and actions would have to run their JS runtime inside them.
+      - name: Build RPM on ${{ matrix.os }}
+        run: docker run --rm -v "$PWD:/src" -w /src ${{ matrix.image }} bash ./build-rpm.sh
+
+      - name: Smoke test on ${{ matrix.os }}
+        run: docker run --rm -v "$PWD:/src" -w /src ${{ matrix.image }} bash ./ci/smoke-test.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rpm-${{ matrix.os }}
+          path: dist/*.rpm
+          if-no-files-found: warn
