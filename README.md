@@ -6,7 +6,8 @@ running on a machine nobody is watching.
 
 ## What it does
 
-- Runs 5 minutes after boot, then every 3 days after that.
+- Runs once right after the package is installed, 5 minutes after every boot,
+  and every 3 days after that.
 - A machine that was powered off at the scheduled time catches up through
   the boot run. The 3-day interval counts uptime (monotonic clock), not
   calendar days.
@@ -38,32 +39,23 @@ running on a machine nobody is watching.
 ## RED OS 7.3 specifics
 
 On 7.3 only the Linux 6.1 kernel branch is still fully supported (5.15 got its
-last update in February 2025). The 7.3 script therefore:
-
-- after a successful `dnf update`, installs `redos-kernels6-release`, runs
-  `dnf makecache` and updates again -- the procedure from the RED OS knowledge
-  base article "Обновление ядра Linux до версии 6.1 в РЕД ОС 7.3";
-- installs kernel-module packages for the newest kernel. On RED OS their name
-  carries the kernel build (`nvidia-kmod_$(uname -r)`), so `dnf update` never
-  brings them along with a new kernel. If a module for the new kernel is not
-  in the repo yet, the running kernel stays the grub default (via `grubby`)
-  until it appears; the pin is recorded in `/var/lib/dnf-auto-update/pinned-kernel`;
-- never reboots: the new kernel is used after the next reboot by the user.
-
-Both behaviours can be turned off in `/etc/sysconfig/dnf-auto-update`
-(`KERNEL6_SWITCH`, `KMOD_FOLLOW`).
+last update in February 2025). The 7.3 script installs `redos-kernels6-release`
+once; from then on the regular `dnf update` brings the 6.1 kernel. It never
+reboots: the new kernel is used after the next reboot by the user. Turn this
+off with `KERNEL6_SWITCH=no` in `/etc/sysconfig/dnf-auto-update`.
 
 ## Install
 
 Grab the `.rpm` for your release from [`dist/`](dist/) and:
 
 ```sh
-dnf install ./dnf-auto-update-1.1-1.el7.noarch.rpm     # RED OS 7.3
-dnf install ./dnf-auto-update-1.1-1.red80.noarch.rpm   # RED OS 8
+dnf install ./dnf-auto-update-1.2-1.el7.noarch.rpm     # RED OS 7.3
+dnf install ./dnf-auto-update-1.2-1.red80.noarch.rpm   # RED OS 8
 ```
 
-The package's `%post` scriptlet enables and starts the timer immediately --
-no reboot needed. Check it with:
+On first install the package enables the timer and starts one update run
+right away (it waits for the installing dnf to finish) -- no reboot needed.
+Check it with:
 
 ```sh
 systemctl list-timers dnf-auto-update.timer

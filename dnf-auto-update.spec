@@ -1,5 +1,5 @@
 Name:           dnf-auto-update
-Version:        1.1
+Version:        1.2
 Release:        1%{?dist}
 Summary:        Unattended dnf updates every 3 days with automatic conflict resolution
 
@@ -39,10 +39,10 @@ without babysitting.
   desktop environment is installed -- KDE/sddm, GNOME/gdm, MATE/lightdm, ...)
   is still active and restarts it if the update knocked it down.
 - Refuses to run two copies at once (flock).
-- Picks a per-release script by /etc/os-release. On RED OS 7.3 it also moves
-  the machine to the supported Linux 6.1 kernel branch (kernels6 repo) and
-  installs kernel-module packages for the new kernel, keeping the current
-  kernel as boot default while a module is missing. It never reboots.
+- Picks a per-release script by /etc/os-release. On RED OS 7.3 it also
+  installs redos-kernels6-release once, so regular updates move the machine
+  to the supported Linux 6.1 kernel branch. It never reboots.
+- Runs once right after the package is first installed.
 
 %prep
 %setup -q
@@ -52,7 +52,6 @@ install -Dm0755 dnf-auto-update-dispatch.sh %{buildroot}%{_sbindir}/dnf-auto-upd
 install -Dm0755 dnf-auto-update.sh %{buildroot}%{_libexecdir}/dnf-auto-update/redos-8
 install -Dm0755 dnf-auto-update-redos73.sh %{buildroot}%{_libexecdir}/dnf-auto-update/redos-7.3
 install -Dm0644 dnf-auto-update.sysconfig %{buildroot}%{_sysconfdir}/sysconfig/dnf-auto-update
-install -dm0755 %{buildroot}%{_sharedstatedir}/dnf-auto-update
 install -Dm0644 dnf-auto-update.service %{buildroot}%{_unitdir}/dnf-auto-update.service
 install -Dm0644 dnf-auto-update.timer %{buildroot}%{_unitdir}/dnf-auto-update.timer
 install -Dm0644 dnf-auto-update.logrotate %{buildroot}%{_sysconfdir}/logrotate.d/dnf-auto-update
@@ -62,7 +61,6 @@ install -Dm0644 dnf-auto-update.logrotate %{buildroot}%{_sysconfdir}/logrotate.d
 %doc README.md
 %{_sbindir}/dnf-auto-update
 %{_libexecdir}/dnf-auto-update/
-%dir %{_sharedstatedir}/dnf-auto-update
 %config(noreplace) %{_sysconfdir}/sysconfig/dnf-auto-update
 %{_unitdir}/dnf-auto-update.service
 %{_unitdir}/dnf-auto-update.timer
@@ -73,6 +71,10 @@ install -Dm0644 dnf-auto-update.logrotate %{buildroot}%{_sysconfdir}/logrotate.d
 # Fresh install only: on upgrade this would re-enable a timer the admin disabled.
 if [ $1 -eq 1 ]; then
     systemctl enable --now dnf-auto-update.timer >/dev/null 2>&1 || :
+    # The timer alone would not fire until the next boot: OnBootSec has long
+    # passed and OnUnitActiveSec counts from a service run that never happened.
+    # --no-block: the run waits for this dnf transaction to release its lock.
+    systemctl start --no-block dnf-auto-update.service >/dev/null 2>&1 || :
 fi
 
 %preun
@@ -82,6 +84,11 @@ fi
 %systemd_postun_with_restart dnf-auto-update.timer
 
 %changelog
+* Fri Sep 25 2026 Maksim Khripunov <xripmax@gmail.com> - 1.2-1
+- RED OS 7.3: only install redos-kernels6-release once; the regular update
+  does the rest. Drop kernel-module and grubby handling
+- Run once right after the first install instead of waiting for a reboot
+
 * Fri Sep 25 2026 Maksim Khripunov <xripmax@gmail.com> - 1.1-1
 - Dispatch to a per-release script by /etc/os-release
 - RED OS 7.3: switch to the Linux 6.1 kernel branch (redos-kernels6-release)

@@ -1,8 +1,6 @@
 #!/bin/bash
-# RED OS 7.3 variant. Same update/escalation logic as the RED OS 8 script, plus:
-#   - moves the machine onto the supported 6.1 kernel branch (kernels6 repo);
-#   - installs kernel-module packages (<driver>_<uname -r>) for the newest kernel
-#     and keeps booting the current kernel if some module is not available yet.
+# RED OS 7.3 variant. Same update/escalation logic as the RED OS 8 script, plus
+# a one-time switch to the supported 6.1 kernel branch (kernels6 repo).
 # Never reboots: the new kernel is picked up whenever the user reboots.
 set -uo pipefail
 
@@ -11,12 +9,9 @@ export LANG=C
 
 LOCKFILE=/var/run/dnf-auto-update.lock
 LOGFILE=/var/log/dnf-auto-update.log
-STATEDIR=/var/lib/dnf-auto-update
-PINFILE=$STATEDIR/pinned-kernel
 MAX_ITERATIONS=12
 
 KERNEL6_SWITCH=yes
-KMOD_FOLLOW=yes
 # shellcheck disable=SC1091
 [ -r /etc/sysconfig/dnf-auto-update ] && . /etc/sysconfig/dnf-auto-update
 
@@ -152,115 +147,15 @@ run_update() {
 }
 
 # 5.15 and older kernels get no updates on RED OS 7.3 anymore; only 6.1 is fully
-# supported. Procedure per the RED OS knowledge base ("Обновление ядра Linux до
-# версии 6.1 в РЕД ОС 7.3"): update the system, install redos-kernels6-release,
-# makecache, update again.
-switch_to_kernel6() {
+# supported. Installing redos-kernels6-release once is all it takes: from then
+# on the regular dnf update brings the 6.1 kernel and replaces kernel-lt itself.
+enable_kernels6() {
     [ "$KERNEL6_SWITCH" = yes ] || return 0
     rpm -q redos-kernels6-release &>/dev/null && return 0
 
     log "Enabling kernels6 repository (Linux 6.1 branch)"
-    if ! dnf install -y redos-kernels6-release; then
-        log "WARNING: could not install redos-kernels6-release, staying on the current kernel branch"
-        return 0
-    fi
-    dnf makecache
-    log "Updating kernel and kernel-dependent packages from kernels6"
-    run_update
-}
-
-installed_kernels() {
-    local d v
-    for d in /lib/modules/*/; do
-        v=$(basename "$d")
-        [ -e "/boot/vmlinuz-$v" ] && echo "$v"
-    done | sort -V
-}
-
-newest_kernel() {
-    installed_kernels | tail -n1
-}
-
-# Package names a driver may have for kernel $2: with and without ".<arch>".
-kmod_candidates() {
-    local base=$1 k=$2 short
-    echo "${base}_${k}"
-    short="${k%.$(uname -m)}"
-    [ "$short" != "$k" ] && echo "${base}_${short}"
-    return 0
-}
-
-# True if every driver in $2 (whitespace list) is installed for kernel $1.
-kernel_has_kmods() {
-    local k=$1 base cand ok
-    for base in $2; do
-        ok=0
-        for cand in $(kmod_candidates "$base" "$k"); do
-            rpm -q "$cand" &>/dev/null && { ok=1; break; }
-        done
-        [ $ok -eq 1 ] || return 1
-    done
-    return 0
-}
-
-# Kernel-module packages on RED OS carry the full kernel build in their name
-# (nvidia-kmod_6.1.158-1.el7.x86_64), so a new kernel -- even a minor one --
-# never gets its drivers through `dnf update`. For every driver installed for
-# any kernel, install the same driver for the newest kernel. If one is missing
-# from the repo, make the newest kernel that has all drivers the boot default so
-# the next boot does not come up without, say, the GPU driver; lift the pin once
-# the driver appears.
-follow_kmods() {
-    [ "$KMOD_FOLLOW" = yes ] || return 0
-
-    local newest
-    newest=$(newest_kernel)
-    [ -z "$newest" ] && return 0
-
-    # Driver names without the "_<kernel build>" suffix, deduplicated across kernels.
-    # The build may itself contain "_" (".x86_64"), so cut at "_<digits>.<digits>...-".
-    local kre='_[0-9]+\.[0-9]+(\.[0-9]+)?-.*$'
-    local bases
-    bases=$(rpm -qa --qf '%{NAME}\n' | grep -E "$kre" | sed -E "s/$kre//" | sort -u)
-
-    local missing=() base cand ok
-    for base in $bases; do
-        kernel_has_kmods "$newest" "$base" && continue
-        ok=0
-        for cand in $(kmod_candidates "$base" "$newest"); do
-            log "Installing kernel module package $cand for kernel $newest"
-            if dnf install -y "$cand"; then ok=1; break; fi
-        done
-        [ $ok -eq 0 ] && missing+=("$base")
-    done
-
-    if [ ${#missing[@]} -gt 0 ]; then
-        log "WARNING: no kernel module package for $newest: ${missing[*]}"
-        local k fallback=""
-        for k in $(installed_kernels | sort -rV); do
-            [ "$k" = "$newest" ] && continue
-            if kernel_has_kmods "$k" "$bases"; then fallback=$k; break; fi
-        done
-        if [ -z "$fallback" ]; then
-            log "WARNING: no installed kernel has all of: $(echo $bases) -- boot default left as is, manual check needed"
-        elif ! command -v grubby &>/dev/null; then
-            log "WARNING: grubby not found, cannot make $fallback the boot default -- next boot may use $newest without those modules"
-        elif grubby --set-default "/boot/vmlinuz-$fallback"; then
-            mkdir -p "$STATEDIR"
-            echo "$newest" > "$PINFILE"
-            log "Boot default set to $fallback until modules for $newest are available"
-        else
-            log "WARNING: grubby --set-default failed -- next boot may use $newest without those modules"
-        fi
-        return 0
-    fi
-
-    if [ -f "$PINFILE" ] && command -v grubby &>/dev/null; then
-        if grubby --set-default "/boot/vmlinuz-$newest"; then
-            rm -f "$PINFILE"
-            log "All kernel modules available for $newest, boot default switched to it"
-        fi
-    fi
+    dnf install -y redos-kernels6-release \
+        || log "WARNING: could not install redos-kernels6-release, staying on the current kernel branch"
     return 0
 }
 
@@ -290,15 +185,11 @@ check_graphical_session() {
 
 log "=== dnf auto-update start (RED OS 7.3) ==="
 
-success=0
-if run_update && switch_to_kernel6; then
-    success=1
-fi
-follow_kmods
+enable_kernels6
 
-newest=$(newest_kernel)
-if [ -n "$newest" ] && [ "$newest" != "$(uname -r)" ] && [ ! -f "$PINFILE" ]; then
-    log "Kernel $newest installed, will be used after the next reboot (running $(uname -r))"
+success=0
+if run_update; then
+    success=1
 fi
 
 check_graphical_session
